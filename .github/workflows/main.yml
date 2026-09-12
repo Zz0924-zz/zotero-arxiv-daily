@@ -78,7 +78,10 @@ jobs:
           CORE_COLLECTION = "01_直接核心"
           MODEL = os.getenv("LLM_MODEL", "deepseek-ai/DeepSeek-V3.2")
           MIN_SCORE = 8.0
-          LOOKBACK_DAYS = 14
+          # 每天运行；同时检索近期论文和过去15年的专题文献，逐次补齐小众领域的历史证据。
+          OPENALEX_DISCOVERY_DAYS = 15 * 365
+          OPENALEX_RECENT_DAYS = 60
+          BIORXIV_LOOKBACK_DAYS = 60
           HISTORY_DAYS = 120
           HISTORY_FILE = Path(".cache/strict_daily_v3.json")
           RULE_VERSION = "organ-trait-history-v3"
@@ -91,34 +94,27 @@ jobs:
           LAST_LLM_ERROR: dict[str, Any] | None = None
           LLM_BLOCKED = False
 
+          # 10个布尔检索式各运行“近期排序”和“15年相关度排序”，共20次请求。
+          # OpenAlex匿名额度足够日常使用，也避免大量逐词查询拖慢任务。
           OPENALEX_QUERIES = [
-              # 对象+性状；不要求每篇论文用同一组长关键词。
-              "samara color", "samara pigmentation", "samara anthocyanin",
-              "winged fruit coloration", "winged seed pigmentation",
-              "wind dispersed diaspore color", "fruit wing perianth color",
-              "Salsola perianth colour", "Haloxylon diaspore color",
-              "Ailanthus samara pigmentation", "Acer samara pigmentation",
-              # 类比对象+着色功能/投入。普通开花、基因调控不作为独立入口。
-              "unripe fruit coloration function", "immature fruit anthocyanin photoprotection",
-              "unripe fruit color defense", "fruit pedicel coloration", "infructescence color function",
-              "fruit stalk color function", "infructescence coloration function",
-              "fruit pigmentation resource allocation", "fruit pigmentation evolutionary constraint",
-              "seed coat pigmentation ecological function", "fruit anthocyanin ultraviolet protection",
-              "bract pigmentation photoprotection", "perianth colour germination",
-              # 明确允许没有颜色的系统、化石、定年、地理证据。
-              "samara fossil", "winged fruit fossil", "winged seed fossil",
-              "samara phylogeny", "samara biogeography", "samara climatic niche",
-              "samara ancestral reconstruction", "wind dispersal evolution phylogeny",
-              "Acer divergence time fossil", "Ailanthus fossil biogeography",
-              "Fraxinus divergence time", "Ulmus historical biogeography",
+              '(samara OR "winged fruit" OR "winged seed" OR "wind dispersed diaspore" OR anemochorous) AND (color OR colour OR coloration OR pigmentation OR anthocyanin OR red)',
+              '("winged perianth" OR "fruit wing" OR "persistent perianth") AND (color OR colour OR pigmentation OR anthocyanin OR red)',
+              '(Salsola OR Haloxylon OR Anabasis OR Calligonum OR Rheum OR Acer OR Ailanthus OR Fraxinus) AND (samara OR diaspore OR "winged fruit" OR "fruit wing") AND (color OR colour OR pigmentation OR anthocyanin OR red)',
+              '("unripe fruit" OR "immature fruit") AND (color OR colour OR pigmentation OR anthocyanin) AND (function OR photoprotection OR defense OR defence OR ultraviolet OR cost OR allocation OR constraint)',
+              '("fruit stalk" OR pedicel OR peduncle OR infructescence) AND (color OR colour OR pigmentation) AND (function OR signal OR defense OR defence OR protection OR evolution)',
+              '("persistent calyx" OR "persistent bract" OR "persistent perianth" OR "seed coat") AND (color OR colour OR pigmentation) AND (function OR photoprotection OR germination OR dormancy OR defense OR defence OR evolution)',
+              '(samara OR "winged fruit" OR "winged seed") AND (fossil OR phylogeny OR biogeography OR "divergence time" OR "ancestral range" OR "climatic niche")',
+              '("wind dispersed diaspore" OR "wind dispersal") AND (evolution OR phylogeny OR biogeography OR "ancestral state" OR geography)',
+              '(Acer OR Dipteronia OR Ailanthus OR Fraxinus OR Ulmus OR Pterocarya OR Betula OR Alnus OR Carpinus OR Ostrya) AND (fossil OR "divergence time" OR "historical biogeography" OR "ancestral range")',
+              '(Salsola OR Haloxylon OR Anabasis OR Calligonum OR Rheum OR Dipterocarpus OR Shorea OR Hopea) AND (fossil OR phylogeny OR biogeography OR "divergence time" OR "ancestral range")',
           ]
 
           # 黄酮、类胡萝卜素、光谱、反射率本身不证明研究了可见着色。
           COLOR_RE = re.compile(r"\b(?:colou?r(?:ation|ed|ing|s)?|pigment(?:ation|ed|s)?|anthocyan\w*|redness|reddish|red|pink|purple|yellow|blue|black|white|orange)\b|着色|色素|花青素|红色|颜色", re.I)
-          REPRODUCTIVE_RE = re.compile(r"\b(?:unripe fruit|immature fruit|fruit|seed|diaspore|samara|pericarp|testa|seed coat|perianth|bract|pedicel|peduncle|fruit stalk|infructescence|achene|utricle)s?\b|翅果|果实|种子|果皮|种皮|果梗|果序|花被|苞片|传播体", re.I)
+          REPRODUCTIVE_RE = re.compile(r"\b(?:unripe fruit|immature fruit|fruit|seed|diaspore|disseminule|propagule|samara|pericarp|testa|seed coat|perianth|calyx|bract|pedicel|peduncle|fruit stalk|infructescence|achene|utricle)s?\b|翅果|果实|种子|果皮|种皮|果梗|果序|花被|花萼|苞片|传播体", re.I)
           DIRECT_RE = re.compile(r"\bsamaras?\b|\banemochor\w*\b|\bwind[ -](?:dispers\w*|borne)\b|\bdispers\w*\s+by\s+(?:the\s+)?wind\b|\bwinged[ -](?:fruit|seed|diaspore|perianth|bract|achene)s?\b|\b(?:fruit|seed)[ -]wings?\b|翅果|风传播|风力传播|风散布|翅状花被", re.I)
           # 类群名只能触发系统/定年的候选入口；终审仍必须验证论文实际提供的数据。
-          WIND_LINEAGE_RE = re.compile(r"\b(?:Acer|Ailanthus|Fraxinus|Ulmus)\b", re.I)
+          WIND_LINEAGE_RE = re.compile(r"\b(?:Acer|Dipteronia|Ailanthus|Fraxinus|Ulmus|Zelkova|Pterocarya|Betula|Alnus|Carpinus|Ostrya|Salsola|Haloxylon|Anabasis|Calligonum|Rheum|Dipterocarpus|Shorea|Hopea|Combretum|Terminalia)\b", re.I)
           HISTORY_RE = re.compile(r"\bfossil\w*\b|\bpalaeo\w*\b|\bpaleo\w*\b|\bphylogen\w*\b|\bbiogeograph\w*\b|\bdivergence\s+(?:time|dating)\b|\bmolecular\s+(?:dating|clock)\b|\bancestral\w*\b|\bdistribution\w*\b|\bclimatic niche\b|\bgeograph\w*\b|\borigin\w*\b|\bevol\w*\b|化石|定年|系统发育|地理|分布|演化|祖先", re.I)
           LINEAGE_HISTORY_RE = re.compile(r"\bfossil\w*\b|\bdivergence\s+(?:time|dating)\b|\bmolecular\s+(?:dating|clock)\b|\bdated phylogen\w*\b|\bbiogeograph\w*\b|\bancestral\s+(?:area|range)\b|\bpalaeo\w*\b|\bpaleo\w*\b|化石|定年|历史生物地理", re.I)
           FUNCTION_RE = re.compile(r"\bfunction\w*\b|\bphotoprotect\w*\b|\bphotoinhibit\w*\b|\boxidativ\w*\b|\bultraviolet\b|\bUV\w*\b|\bprotect\w*\b|\bdefen[cs]\w*\b|\bcost\w*\b|\binvest\w*\b|\ballocat\w*\b|\btrade[ -]?off\w*\b|\bconstraint\w*\b|\bby[ -]?product\w*\b|\bthermal\b|\btemperatur\w*\b|\bpathogen\w*\b|\bfung\w*\b|\bantioxid\w*\b|\bgerminat\w*\b|\bdorman\w*\b|\bfitness\b|\badapt\w*\b|\bevol\w*\b|\bsignal\w*\b|\bherbivor\w*\b|\bpredat\w*\b|\bmimic\w*\b|功能|保护|防御|成本|投入|萌发|演化|成熟", re.I)
@@ -157,6 +153,10 @@ jobs:
                   try:
                       response = requests.get(url, params=params, timeout=30,
                                               headers={"User-Agent": "wind-diaspore-evidence-alert/3.0"})
+                      if response.status_code == 429:
+                          WARNINGS.append("文献源当日匿名查询额度已用完；请下次运行再试")
+                          log("Literature source rate limit reached; skipping remaining retries for this request")
+                          return {}
                       response.raise_for_status()
                       payload = response.json()
                       if not isinstance(payload, dict):
@@ -191,69 +191,74 @@ jobs:
 
           def fetch_openalex() -> list[dict[str, Any]]:
               end = date.today()
-              start = end - timedelta(days=LOOKBACK_DAYS)
-              filters = (
-                  f"from_publication_date:{start.isoformat()},"
-                  f"to_publication_date:{end.isoformat()},"
-                  "has_abstract:true,type:article|review"
-              )
               select = (
                   "id,doi,display_name,authorships,abstract_inverted_index,"
                   "publication_date,primary_location,best_oa_location,type"
               )
               unique: dict[str, dict[str, Any]] = {}
-              for query in OPENALEX_QUERIES:
-                  payload = get_json(
-                      "https://api.openalex.org/works",
-                      {
-                          "search": query,
-                          "filter": filters,
-                          "per_page": 25,
-                          "sort": "publication_date:desc",
-                          "select": select,
-                      },
+              plans = (
+                  (OPENALEX_RECENT_DAYS, "publication_date:desc"),
+                  (OPENALEX_DISCOVERY_DAYS, "relevance_score:desc"),
+              )
+              for days, sort_order in plans:
+                  start = end - timedelta(days=days)
+                  filters = (
+                      f"from_publication_date:{start.isoformat()},"
+                      f"to_publication_date:{end.isoformat()},"
+                      "has_abstract:true,type:article|review"
                   )
-                  if isinstance(payload.get("results"), list):
-                      SOURCE_COUNTS["OpenAlex"] = SOURCE_COUNTS.get("OpenAlex", 0) + 1
-                  elif payload:
-                      WARNINGS.append("OpenAlex响应格式异常")
-                  for raw in payload.get("results", []):
-                      title = str(raw.get("display_name") or "").strip()
-                      abstract = reconstruct_abstract(raw.get("abstract_inverted_index"))
-                      if not title or not abstract:
-                          continue
-                      authors = []
-                      for authorship in raw.get("authorships") or []:
-                          author = (authorship.get("author") or {}).get("display_name")
-                          if author:
-                              authors.append(str(author))
-                      best = raw.get("best_oa_location") or {}
-                      primary = raw.get("primary_location") or {}
-                      doi = str(raw.get("doi") or "")
-                      url = (
-                          best.get("landing_page_url")
-                          or primary.get("landing_page_url")
-                          or doi
-                          or raw.get("id")
-                          or ""
+                  for query in OPENALEX_QUERIES:
+                      payload = get_json(
+                          "https://api.openalex.org/works",
+                          {
+                              "search": query,
+                              "filter": filters,
+                              "per_page": 100,
+                              "sort": sort_order,
+                              "select": select,
+                          },
                       )
-                      key = (doi or str(raw.get("id") or title)).lower()
-                      unique[key] = {
-                          "title": title,
-                          "abstract": abstract,
-                          "authors": authors,
-                          "date": str(raw.get("publication_date") or ""),
-                          "doi": doi,
-                          "url": str(url),
-                          "source": "OpenAlex",
-                      }
+                      if isinstance(payload.get("results"), list):
+                          SOURCE_COUNTS["OpenAlex"] = SOURCE_COUNTS.get("OpenAlex", 0) + 1
+                      elif payload:
+                          WARNINGS.append("OpenAlex响应格式异常")
+                      for raw in payload.get("results", []):
+                          title = str(raw.get("display_name") or "").strip()
+                          abstract = reconstruct_abstract(raw.get("abstract_inverted_index"))
+                          if not title or not abstract:
+                              continue
+                          authors = []
+                          for authorship in raw.get("authorships") or []:
+                              author = (authorship.get("author") or {}).get("display_name")
+                              if author:
+                                  authors.append(str(author))
+                          best = raw.get("best_oa_location") or {}
+                          primary = raw.get("primary_location") or {}
+                          doi = str(raw.get("doi") or "")
+                          url = (
+                              best.get("landing_page_url")
+                              or primary.get("landing_page_url")
+                              or doi
+                              or raw.get("id")
+                              or ""
+                          )
+                          key = (doi or str(raw.get("id") or title)).lower()
+                          unique[key] = {
+                              "title": title,
+                              "abstract": abstract,
+                              "authors": authors,
+                              "date": str(raw.get("publication_date") or ""),
+                              "doi": doi,
+                              "url": str(url),
+                              "source": "OpenAlex",
+                          }
               log(f"OpenAlex: {len(unique)} unique recent papers")
               return list(unique.values())
 
 
           def fetch_biorxiv() -> list[dict[str, Any]]:
               end = date.today()
-              start = end - timedelta(days=LOOKBACK_DAYS)
+              start = end - timedelta(days=BIORXIV_LOOKBACK_DAYS)
               cursor = 0
               results: list[dict[str, Any]] = []
               while cursor < 5000:
@@ -589,7 +594,9 @@ jobs:
               for lane in LANES:
                   accepted = sorted([p for p in qualified if p["tier"] == lane], key=lambda p: (p["score"], p.get("date", "")), reverse=True)
                   selected.extend(accepted[:LIMITS[lane]])
-              stats = {"回看天数": LOOKBACK_DAYS, "抓取": len(fetched), "未审查过": len(unseen),
+              stats = {"OpenAlex近期回看天数": OPENALEX_RECENT_DAYS,
+                       "OpenAlex专题回看年数": 15, "bioRxiv回看天数": BIORXIV_LOOKBACK_DAYS,
+                       "抓取": len(fetched), "未审查过": len(unseen),
                        "主题候选": len(candidates), "完成审查": complete, "发送": len(selected),
                        "候选未处理或待重试": len(candidates) - complete,
                        "通过但待下次推送": len(qualified) - len(selected)}
@@ -666,8 +673,36 @@ jobs:
                       return None
               return {**result, "score": float(score)}
 
+          def candidate_priority(paper: dict[str, Any], lane: str) -> tuple[int, str]:
+              # 只决定审查顺序，不改变最终准入标准。标题中的完整证据优先于摘要中的散落词。
+              title = normalized(str(paper.get("title") or ""))
+              body = normalized(str(paper.get("abstract") or ""))
+              score = 0
+              if lane == "A_COLOR":
+                  score += 10 if colour_pair(title) else 0
+                  score += 7 if DIRECT_RE.search(title) else 0
+                  score += 3 if FUNCTION_RE.search(title) else 0
+                  score += 2 if colour_pair(body) else 0
+              elif lane == "B_COLOR_ANALOG":
+                  score += 9 if colour_pair(title) else 0
+                  score += 6 if FUNCTION_RE.search(title) else 0
+                  score += 2 if colour_pair(body) and FUNCTION_RE.search(body) else 0
+              elif lane == "C_WIND_HISTORY":
+                  score += 9 if DIRECT_RE.search(title) and HISTORY_RE.search(title) else 0
+                  score += 8 if WIND_LINEAGE_RE.search(title) and LINEAGE_HISTORY_RE.search(title) else 0
+                  score += 2 if HISTORY_RE.search(body) else 0
+              return score, str(paper.get("date") or "")
+
+
           def balanced_candidates(papers: list[dict[str, Any]]) -> list[dict[str, Any]]:
-              groups = {lane: sorted([p for p in papers if lane in p["possible_lanes"]], key=lambda p: p.get("date", ""), reverse=True) for lane in LANES}
+              groups = {
+                  lane: sorted(
+                      [p for p in papers if lane in p["possible_lanes"]],
+                      key=lambda p: candidate_priority(p, lane),
+                      reverse=True,
+                  )
+                  for lane in LANES
+              }
               chosen, ids = [], set()
               while any(groups.values()) and len(chosen) < MAX_LLM_CANDIDATES:
                   for lane in LANES:
