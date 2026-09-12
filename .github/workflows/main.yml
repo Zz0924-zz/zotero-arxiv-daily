@@ -65,6 +65,7 @@ jobs:
           from email.utils import formataddr
           from pathlib import Path
           from typing import Any
+          from urllib.parse import quote, quote_plus
           from zoneinfo import ZoneInfo
 
           import requests
@@ -87,6 +88,8 @@ jobs:
           MAX_LLM_CANDIDATES = 30
           WARNINGS: list[str] = []
           SOURCE_COUNTS: dict[str, int] = {}
+          LAST_LLM_ERROR: dict[str, Any] | None = None
+          LLM_BLOCKED = False
 
           OPENALEX_QUERIES = [
               # 对象+性状；不要求每篇论文用同一组长关键词。
@@ -427,16 +430,34 @@ jobs:
 
 
           def ask_llm(client: OpenAI, messages: list[dict[str, str]], max_tokens: int) -> str | None:
+              global LAST_LLM_ERROR, LLM_BLOCKED
+              if LLM_BLOCKED:
+                  return None
+              LAST_LLM_ERROR = None
               for attempt in range(2):
                   try:
                       response = client.chat.completions.create(model=MODEL, messages=messages,
                                                                  max_tokens=max_tokens, temperature=0)
-                      return str(response.choices[0].message.content or "").strip()
+                      content = str(response.choices[0].message.content or "").strip()
+                      if content:
+                          LAST_LLM_ERROR = None
+                          return content
+                      LAST_LLM_ERROR = {"exception": "EmptyModelResponse", "http_status": 200,
+                                        "message": "模型未返回可读取的正文，不能执行论文审查"}
                   except Exception as exc:
-                      log(f"LLM request failed ({attempt + 1}/2): {type(exc).__name__}")
-                      if attempt == 0:
-                          time.sleep(2)
-              WARNINGS.append("AI审查请求失败，未完成的论文留待下次复查")
+                      LAST_LLM_ERROR = describe_llm_error(exc)
+                      status = LAST_LLM_ERROR.get("http_status")
+                      log("LLM request failed: " + json.dumps(LAST_LLM_ERROR, ensure_ascii=False))
+                      # Stop repeating the same configuration/payment/authentication error for every paper.
+                      if status in {400, 401, 402, 403, 404, 405, 422} or (status and 300 <= status < 400):
+                          LLM_BLOCKED = True
+                          break
+                      if status and 400 <= status < 500 and status not in {408, 409, 429}:
+                          break
+                  if attempt == 0:
+                      time.sleep(2)
+              detail = LAST_LLM_ERROR or {"exception": "UnknownError", "message": "AI未返回有效结果"}
+              WARNINGS.append("AI接口异常：" + json.dumps(detail, ensure_ascii=False))
               return None
 
 
@@ -502,7 +523,7 @@ jobs:
               return "\n".join(content)
 
 
-          def send_email(html_body: str, paper_count: int) -> None:
+          def send_email(html_body: str, paper_count: int, status_label: str = "") -> None:
               sender = required_env("SENDER")
               receiver_raw = required_env("RECEIVER")
               password = required_env("SENDER_PASSWORD")
@@ -517,7 +538,8 @@ jobs:
               message = MIMEText(html_body, "html", "utf-8")
               message["From"] = formataddr((str(Header("GitHub Actions", "utf-8")), sender))
               message["To"] = ", ".join(receivers)
-              message["Subject"] = str(Header(f"风传播体颜色与演化日报 {today_cn}（{paper_count}篇）", "utf-8"))
+              label = status_label or f"{paper_count}篇"
+              message["Subject"] = str(Header(f"风传播体颜色与演化日报 {today_cn}（{label}）", "utf-8"))
               with smtplib.SMTP_SSL("smtp.qq.com", 465, timeout=45) as server:
                   server.login(sender, password)
                   server.sendmail(sender, receivers, message.as_string())
@@ -527,6 +549,7 @@ jobs:
               llm_client = OpenAI(api_key=required_env("OPENAI_API_KEY"),
                                   base_url=os.getenv("OPENAI_API_BASE", "").strip() or None,
                                   timeout=40, max_retries=0)
+              check_ai_connection(llm_client)
               anchors = fetch_zotero_anchors()
               history = load_history()
               fetched = deduplicate(fetch_openalex() + fetch_biorxiv())
@@ -549,6 +572,8 @@ jobs:
                   decision = judge_paper(llm_client, paper, anchors)
                   if decision is None:
                       failed += 1
+                      if LLM_BLOCKED:
+                          report_ai_failure("论文审查期间")
                       continue
                   complete += 1
                   log(f"Decision {decision['tier']}: {paper['title']}")
@@ -556,6 +581,8 @@ jobs:
                       rejected.append(paper_identity(paper))
                   else:
                       qualified.append({**paper, **decision})
+              if queued and complete == 0 and LAST_LLM_ERROR is not None:
+                  report_ai_failure("论文审查期间，全部候选均未完成")
               if failed:
                   WARNINGS.append(f"{failed}篇候选未完成有效的AI判断/原文证据核对，将重试")
               selected = []
@@ -654,6 +681,88 @@ jobs:
                       if len(chosen) >= MAX_LLM_CANDIDATES:
                           break
               return chosen
+
+
+
+          def safe_error_text(value: Any) -> str:
+              text = str(value)
+              # Redact BEFORE truncation: providers sometimes echo invalid credentials.
+              for name in ("OPENAI_API_KEY", "ZOTERO_KEY", "SENDER_PASSWORD", "SENDER", "RECEIVER", "ZOTERO_ID", "OPENAI_API_BASE"):
+                  secret = os.getenv(name, "").strip()
+                  if secret:
+                      for variant in (secret, quote(secret, safe=""), quote_plus(secret), json.dumps(secret, ensure_ascii=True)[1:-1], json.dumps(secret, ensure_ascii=False)[1:-1]):
+                          text = text.replace(variant, "[已隐藏]")
+              text = re.sub(r"(?i)\bBearer\s+[^\s,;\"']+", "Bearer [已隐藏]", text)
+              text = re.sub(r"\bsk-[A-Za-z0-9_-]+", "[已隐藏]", text)
+              text = re.sub(r"[A-Za-z0-9_.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", "[邮箱已隐藏]", text)
+              text = re.sub(r"https?://[^\s<>\"']+", "[服务地址已隐藏]", text)
+              return re.sub(r"\s+", " ", text).strip()[:500]
+
+          def describe_llm_error(exc: Exception) -> dict[str, Any]:
+              response = getattr(exc, "response", None)
+              status = getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+              status = status if type(status) is int else None
+              body = getattr(exc, "body", None)
+              error = body.get("error", body) if isinstance(body, dict) else None
+              fields = {}
+              if isinstance(error, dict):
+                  for name in ("code", "type", "message"):
+                      if isinstance(error.get(name), (str, int)):
+                          fields[name] = safe_error_text(error[name])
+              elif isinstance(error, str):
+                  fields["message"] = safe_error_text(error)
+              # Do not dump exception/request/response bodies, which can contain submitted literature.
+              if not fields.get("message"):
+                  fields["message"] = "服务未提供结构化错误说明，请根据HTTP状态码检查接口配置或服务状态"
+              detail = {"exception": type(exc).__name__, "http_status": status, **fields}
+              return detail
+
+          def error_hint(detail: dict[str, Any]) -> str:
+              code = detail.get("http_status")
+              hints = {
+                  400: "请求格式或参数未被接受；请核对服务商说明中的具体参数。",
+                  401: "鉴权失败；请检查API密钥是否有效，以及密钥与接口地址是否属于同一平台。",
+                  402: "接口返回支付/额度类错误；请按服务商具体说明核对余额或可用额度。",
+                  403: "访问被拒绝；请核对账号和模型访问权限。",
+                  404: "请求资源不存在；请核对接口地址和模型名称。",
+                  405: "请求方法未被接受；请核对接口地址是否为API入口。",
+                  413: "请求内容过大；需要缩短请求。",
+                  422: "请求参数不符合服务要求；请查看具体错误说明。",
+                  429: "请求受限；请核对速率限制和服务商的额度说明。",
+              }
+              if code in hints:
+                  return hints[code]
+              if code and code >= 500:
+                  return "服务端返回错误；重试仍失败时需核对服务状态。"
+              if detail.get("exception") in ("APITimeoutError", "APIConnectionError"):
+                  return "连接超时或网络连接失败；需核对服务地址和服务状态。"
+              return "请将HTTP状态码与服务商错误说明一起提供，以便定位；仅凭错误类名无法确定原因。"
+
+          def report_ai_failure(stage: str) -> None:
+              detail = LAST_LLM_ERROR or {"exception": "ReviewUnavailable", "http_status": None,
+                                        "message": "AI未能完成有效的论文审查"}
+              report = {"状态": "AI接口异常，文献相关性尚未判定", "阶段": stage,
+                        "模型": MODEL, "错误": detail, "处理建议": error_hint(detail)}
+              text = json.dumps(report, ensure_ascii=False, indent=2)
+              log(text)
+              summary = os.getenv("GITHUB_STEP_SUMMARY")
+              if summary:
+                  # HTML-escape provider-controlled text instead of inserting arbitrary markdown.
+                  Path(summary).write_text("AI接口异常，尚未完成文献审查\n\n<pre>" + html.escape(text) + "</pre>\n", encoding="utf-8")
+              body = ('<h2>AI接口异常，尚未完成文献审查</h2><p>这次未能判断论文是否相关。'
+                      '请查看下方状态码和服务商错误说明。</p><pre>' + html.escape(text) + '</pre>')
+              try:
+                  send_email(body, 0, status_label="AI接口异常")
+              except Exception as exc:
+                  log(f"Diagnostic email failed: {type(exc).__name__}; details are in the Actions summary")
+              raise SystemExit(1)
+
+          def check_ai_connection(client: OpenAI) -> None:
+              log("Checking AI connection before literature retrieval")
+              result = ask_llm(client, [{"role": "user", "content": "Reply with OK only."}], 64)
+              if result is None:
+                  report_ai_failure("开始检索前的接口检查")
+              log("AI connection check passed; starting literature retrieval")
 
           if __name__ == "__main__":
               main()
