@@ -79,25 +79,56 @@ jobs:
           MAX_DIRECT = 3
           MAX_MECHANISM = 1
           HISTORY_DAYS = 120
-          LOOKBACK_DAYS = 2
+          # 扩大“候选池”而不是降低相关性：
+          # 回看 14 天可覆盖 OpenAlex/bioRxiv 的收录延迟；历史缓存仍会阻止重复邮件。
+          LOOKBACK_DAYS = 14
           MAX_LLM_CANDIDATES = 40
           HISTORY_FILE = Path(".cache/strict_daily_seen.json")
 
           OPENALEX_QUERIES = [
-              "samara color pigment",
-              "samara colour anthocyanin",
+              # A. 直接对象：翅果、果翅、翅种子和其他风传播繁殖体
+              "samara color",
+              "samara colour",
+              "samara pigmentation",
+              "samara anthocyanin",
+              "red samara",
               "wind-dispersed seed color",
               "wind-dispersed fruit colour",
+              "wind dispersed diaspore pigmentation",
+              "anemochory seed color",
               "winged diaspore coloration",
+              "winged seed pigmentation",
+              "winged seed color",
+              "winged fruit pigmentation",
+              "fruit wing color",
               "winged fruit anthocyanin",
+              "diaspore color polymorphism",
+              "fruit wing color germination",
+              "winged perianth color germination",
+
+              # B. 已知或高潜力类群（只用于增加候选；仍须通过终审）
               "Ailanthus samara red",
-              "Acer samara color",
-              "Salsola winged perianth color",
-              "Haloxylon colored diaspore",
+              "Acer samara color maturation",
+              "Salsola perianth color germination",
+              "Haloxylon diaspore color germination",
+              "Firmiana fruit color wind dispersal",
+
+              # C. 可迁移的非视觉机制（最多只推送 1 篇，且仍须达到 8 分）
+              "seed coat pigmentation photoprotection",
+              "seed pigmentation ultraviolet stress",
+              "pericarp anthocyanin photoprotection",
+              "seed pigmentation oxidative stress",
+              "seed pigmentation fungal defense",
+              "seed color dormancy germination",
+              "diaspore color germination",
+              "dry fruit color evolution",
+              "seed color environmental adaptation",
           ]
 
           POSITIVE_TITLES = [
               "Perianth colour affects germination behaviour",
+              "perianth colour affect",
+              "distinct fruit-wing perianth color",
               "Haloxylon ammodendron",
               "2种红果臭椿",
               "元宝枫",
@@ -119,14 +150,18 @@ jobs:
           )
           DIRECT_RE = re.compile(
               r"\bsamaras?\b|\banemochor\w*\b|\bwind[- ](?:dispers\w*|borne)\b|"
+              r"\bdispers\w*\s+by\s+(?:the\s+)?wind\b|\bwind[- ]assisted\s+dispers\w*\b|"
               r"\bwinged[- ]?(?:seed|fruit|diaspore|propagule|perianth|bract)s?\b|"
+              r"\bwinged[- ]?(?:achene|utricle|nutlet|involucre|calyx)s?\b|"
               r"\b(?:seed|fruit|diaspore|propagule|perianth|bract)[- ]?wings?\b|"
+              r"\b(?:fruit|seed)[- ]wing(?:s|ed)?\b|\bpersistent[- ]perianth\b|"
               r"\bautorotat\w*\b",
               re.I,
           )
           REPRODUCTIVE_RE = re.compile(
               r"\b(?:seed|fruit|diaspore|propagule|samara|pericarp|perianth|bract|"
-              r"cone|peduncle|infructescence)s?\b",
+              r"seed coat|testa|achene|utricle|nutlet|caryopsis|calyx|involucre|"
+              r"pappus|cone|peduncle|infructescence)s?\b",
               re.I,
           )
           MECHANISM_RE = re.compile(
@@ -137,6 +172,8 @@ jobs:
               r"\btemperatur\w*\b|\bthermal\b|\bcold\b|\bheat\b|"
               r"\bpathogen\w*\b|\bfung\w*\b|\bantimicrob\w*\b|"
               r"\bdorman\w*\b|\bgerminat\w*\b|\bviabil\w*\b|"
+              r"\bdesiccat\w*\b|\bdrought\b|\bsalinit\w*\b|\bsalt stress\b|"
+              r"\blongevity\b|\bseedling establishment\b|\bmicrob\w*\b|"
               r"\bdefen[cs]\w*\b|\bherbivor\w*\b|\bmimic\w*\b|"
               r"\baposemat\w*\b|\bstress\w*\b|\babiotic\b|\bclimat\w*\b",
               re.I,
